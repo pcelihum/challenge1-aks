@@ -1,0 +1,104 @@
+name: deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths:
+      - "backend/express-back/**"
+      - "frontend/node-front/**"
+      - "k8s/**"
+      - ".github/workflows/deploy.yml"
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+      IMAGE_TAG: ${{ github.sha }}
+
+      # ✅ AHORA CORRECTO
+      BACKEND_DIR: backend/node-front
+      FRONTEND_DIR: frontend/express-back
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to ACR
+        run: |
+          az acr login --name ${{ secrets.ACR_NAME }}
+
+      # ===============================
+      # 🟢 BACKEND (Express)
+      # ===============================
+      - name: Build & Push Backend
+        run: |
+          docker build -t $ACR_LOGIN_SERVER/node-mongo-backend:$IMAGE_TAG $BACKEND_DIR
+          docker push $ACR_LOGIN_SERVER/node-mongo-backend:$IMAGE_TAG
+
+      # ===============================
+      # 🔵 FRONTEND (React)
+      # ===============================
+      - name: Build & Push Frontend
+        run: |
+          docker build -t $ACR_LOGIN_SERVER/node-mongo-frontend:$IMAGE_TAG $FRONTEND_DIR
+          docker push $ACR_LOGIN_SERVER/node-mongo-frontend:$IMAGE_TAG
+
+      - name: Set AKS context
+        run: |
+          az aks get-credentials \
+            -g ${{ secrets.AKS_RESOURCE_GROUP }} \
+            -n ${{ secrets.AKS_CLUSTER_NAME }} \
+            --overwrite-existing
+
+      - name: Render manifests
+        shell: bash
+        run: |
+          mkdir -p rendered
+
+          cp k8s/namespace.yml rendered/namespace.yml
+          cp k8s/frontend-configmap.yml rendered/frontend-configmap.yml
+          cp k8s/frontend-service.yml rendered/frontend-service.yml
+
+          # Secret con Mongo URI
+          cat > rendered/secrets.yml << EOF
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: app-secret
+            namespace: node-mongo-app
+          type: Opaque
+          stringData:
+            mongodb-uri: "${{ secrets.MONGODB_URI }}"
+          EOF
+
+          # Backend deployment (reemplaza imagen)
+          sed -E \
+            "s|^\s*image:\s*.*node-mongo-backend:.*$|        image: $ACR_LOGIN_SERVER/node-mongo-backend:$IMAGE_TAG|g" \
+            k8s/backend-deployment.yml > rendered/backend-deployment.yml
+
+          # Frontend deployment (reemplaza imagen)
+          sed -E \
+            "s|^\s*image:\s*.*node-mongo-frontend:.*$|        image: $ACR_LOGIN_SERVER/node-mongo-frontend:$IMAGE_TAG|g" \
+            k8s/frontend-deployment.yml > rendered/frontend-deployment.yml
+
+      - name: Deploy to AKS
+        run: |
+          kubectl apply -f rendered/namespace.yml
+          kubectl apply -f rendered/secrets.yml
+          kubectl apply -f rendered/backend-deployment.yml
+          kubectl apply -f rendered/frontend-configmap.yml
+          kubectl apply -f rendered/frontend-deployment.yml
+          kubectl apply -f rendered/frontend-service.yml
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/backend-deployment -n node-mongo-app --timeout=240s
+          kubectl rollout status deployment/frontend-deployment -n node-mongo-app --timeout=240s
+          kubectl get pods -n node-mongo-app
+          kubectl get svc -n node-mongo-app
