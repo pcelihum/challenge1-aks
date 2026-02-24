@@ -14,30 +14,32 @@ jobs:
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
 
-      # ✅ Autenticación Service Principal (NO Azure CLI)
-      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
-      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
-      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
-      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-
     steps:
       - uses: actions/checkout@v4
+
+      - name: Azure Login (SP)
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Export ARM_* for Terraform from AZURE_CREDENTIALS
+        shell: bash
+        run: |
+          set -euo pipefail
+          # jq viene instalado en ubuntu-latest
+          echo "ARM_CLIENT_ID=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientId)" >> $GITHUB_ENV
+          echo "ARM_CLIENT_SECRET=$(echo '${{ secrets.AZURE_CREDENTIALS }}' | jq -r .clientSecret)" >> $GITHUB_ENV
+          echo "ARM_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}" >> $GITHUB_ENV
+          echo "ARM_SUBSCRIPTION_ID=${{ secrets.AZURE_SUBSCRIPTION_ID }}" >> $GITHUB_ENV
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.6.6"
 
-      - name: Terraform Init (remote state)
-        shell: bash
+      - name: Terraform Init
         run: |
-          set -euo pipefail
-          terraform init \
-            -backend-config="resource_group_name=${{ secrets.TFSTATE_RESOURCE_GROUP }}" \
-            -backend-config="storage_account_name=${{ secrets.TFSTATE_STORAGE_ACCOUNT }}" \
-            -backend-config="container_name=${{ secrets.TFSTATE_CONTAINER }}" \
-            -backend-config="key=${{ secrets.TFSTATE_KEY }}" \
-            -reconfigure
+          terraform init -reconfigure
 
       - name: Terraform Validate
         run: terraform validate
